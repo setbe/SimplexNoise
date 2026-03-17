@@ -1,13 +1,14 @@
 // Example for siv::SimplexNoise.hpp (+ BlueNoise2D inside the same header)
 //
 // This demo generates a small "gallery" of BMP images so users can SEE what each noise does.
-// It outputs ALL noise variants provided by your header:
+// It outputs most noise variants provided by your header:
 //   - base Simplex 2D
 //   - FBM (octaves): raw + normalized
 //   - Ridged multifractal
 //   - Domain-warped base
 //   - Domain-warped FBM (raw + normalized idea via clamped remap)
 //   - Domain-warped Ridged
+//   - Voronoi region-id visualization + Voronoi boundary factor
 //   - BlueNoise2D placement visualization (Poisson-disk-like points)
 //
 // Notes:
@@ -135,6 +136,16 @@ static inline float to01_from_01(float v) noexcept {
 // A tiny "slope-ish" helper if you want (optional).
 static inline float absf(float v) noexcept { return (v < 0.f) ? -v : v; }
 
+static inline float hashTo01(std::uint64_t v) noexcept {
+    std::uint32_t x = (std::uint32_t)(v ^ (v >> 32));
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 15;
+    x *= 0x846CA68Bu;
+    x ^= x >> 16;
+    return (float)(x & 0x00FFFFFFu) * (1.0f / 16777216.0f);
+}
+
 // -------------------- Gallery generator --------------------
 enum class NoiseKind {
     Base2D,
@@ -144,6 +155,8 @@ enum class NoiseKind {
     Warp_Base,
     Warp_FBM_Raw,
     Warp_Ridged,
+    Voronoi_RegionId,
+    Voronoi_Boundary,
     BlueNoisePoints
 };
 
@@ -156,6 +169,8 @@ static const char* kindName(NoiseKind k) {
     case NoiseKind::Warp_Base:      return "warp_base";
     case NoiseKind::Warp_FBM_Raw:   return "warp_fbm_raw";
     case NoiseKind::Warp_Ridged:    return "warp_ridged";
+    case NoiseKind::Voronoi_RegionId:return "voronoi_region";
+    case NoiseKind::Voronoi_Boundary:return "voronoi_boundary";
     case NoiseKind::BlueNoisePoints:return "bluenoise_points";
     default:                        return "unknown";
     }
@@ -164,6 +179,7 @@ static const char* kindName(NoiseKind k) {
 static float sampleKind(
     NoiseKind kind,
     const siv::SimplexNoise& n,
+    const siv::VoronoiNoise2D& v,
     float sx, float sz,           // already scaled coordinates (x*freq, z*freq)
     int octaves,
     float pers, float lac,
@@ -198,6 +214,14 @@ static float sampleKind(
         const float v = n.domainWarpRidged2D(sx, sz, octaves, warpAmp, warpFreq, lac, 2.0f, 1.0f);
         return to01_from_01(v);
     }
+    case NoiseKind::Voronoi_RegionId: {
+        const auto q = v.nearest(sx, sz, /*cellSize*/1.0f, /*radius*/1);
+        return hashTo01(q.region_id);
+    }
+    case NoiseKind::Voronoi_Boundary: {
+        const auto q = v.nearestTwo(sx, sz, /*cellSize*/1.0f, /*boundaryWidth*/0.18f, /*radius*/1);
+        return to01_from_01(q.boundary01);
+    }
     default:
         return 0.0f;
     }
@@ -207,6 +231,7 @@ static bool renderNoiseBMP(
     const std::string& filename,
     NoiseKind kind,
     const siv::SimplexNoise& n,
+    const siv::VoronoiNoise2D& v,
     int W, int H,
     float frequency,             // "how many features across the image"
     int octaves,
@@ -225,7 +250,7 @@ static bool renderNoiseBMP(
         for (int x = 0; x < W; ++x) {
             const float sx = (float)x * fx;
             const float sz = (float)z * fz;
-            const float v01 = sampleKind(kind, n, sx, sz, octaves, persistence, lacunarity, warpAmp, warpFreq);
+            const float v01 = sampleKind(kind, n, v, sx, sz, octaves, persistence, lacunarity, warpAmp, warpFreq);
             img.set(x, z, RGB((double)v01));
         }
     }
@@ -298,8 +323,38 @@ static void TestSimplexDeterminism() {
     std::cout << "Determinism tests: OK\n";
 }
 
+static void TestVoronoiDeterminism() {
+    const uint32_t seed = 424242u;
+
+    siv::VoronoiNoise2D a2(seed);
+    siv::VoronoiNoise2D b2(seed);
+    const auto a2n = a2.nearest(15.25f, -7.5f, 64.0f);
+    const auto b2n = b2.nearest(15.25f, -7.5f, 64.0f);
+    assert(a2n.region_id == b2n.region_id);
+    assert(a2n.f1_sq == b2n.f1_sq);
+
+    const auto a2k = a2.nearby(15.25f, -7.5f, 4, 64.0f, 8.0f);
+    const auto b2k = b2.nearby(15.25f, -7.5f, 4, 64.0f, 8.0f);
+    assert(a2k.count == b2k.count);
+    for (int i = 0; i < a2k.count; ++i) {
+        assert(a2k.ids[i] == b2k.ids[i]);
+        assert(a2k.distances_sq[i] == b2k.distances_sq[i]);
+        assert(a2k.weights[i] == b2k.weights[i]);
+    }
+
+    siv::VoronoiNoise3D a3(seed);
+    siv::VoronoiNoise3D b3(seed);
+    const auto a3n = a3.nearest(11.0f, -3.5f, 27.75f, 32.0f);
+    const auto b3n = b3.nearest(11.0f, -3.5f, 27.75f, 32.0f);
+    assert(a3n.region_id == b3n.region_id);
+    assert(a3n.f1_sq == b3n.f1_sq);
+
+    std::cout << "Voronoi determinism tests: OK\n";
+}
+
 int main() {
     TestSimplexDeterminism();
+    TestVoronoiDeterminism();
 
     // -------------------- Gallery settings --------------------
     const int W = 512;
@@ -321,7 +376,7 @@ int main() {
     // Seeds to show "same algorithm, different worlds"
     const uint32_t seeds[] = { 0u, 1u, 12345u, 67890u };
 
-    // Noise kinds (ALL provided variants)
+    // Noise kinds shown in the gallery
     const NoiseKind kinds[] = {
         NoiseKind::Base2D,
         NoiseKind::FBM_Raw,
@@ -330,9 +385,11 @@ int main() {
         NoiseKind::Warp_Base,
         NoiseKind::Warp_FBM_Raw,
         NoiseKind::Warp_Ridged,
+        NoiseKind::Voronoi_RegionId,
+        NoiseKind::Voronoi_Boundary,
     };
 
-    std::cout << "Generating Simplex noise gallery...\n";
+    std::cout << "Generating Simplex + Voronoi noise gallery...\n";
     std::cout << "Image: " << W << "x" << H << "\n";
     std::cout << "Octaves=" << octaves
         << " pers=" << persistence
@@ -343,6 +400,7 @@ int main() {
     // -------------------- Render all noises, all seeds, several frequencies --------------------
     for (uint32_t seed : seeds) {
         siv::SimplexNoise n(seed);
+        siv::VoronoiNoise2D v(seed ^ 0xA5A5A5A5u);
 
         for (float freq : frequencies) {
             for (NoiseKind k : kinds) {
@@ -355,7 +413,7 @@ int main() {
 
                 renderNoiseBMP(
                     name.str(),
-                    k, n,
+                    k, n, v,
                     W, H,
                     freq, octaves,
                     persistence, lacunarity,
